@@ -196,12 +196,12 @@ export default function Assistant({ open, onClose }) {
           </div>
         )}
         {messages.map((m, i) => (
-          <div key={i} className={`bubble ${m.role}${m.error ? ' err' : ''}`}>
+          <div key={i} className={`bubble ${m.role === 'assistant' ? 'bot' : 'me'}${m.error ? ' err' : ''}`}>
             {m.image && <img src={m.image} alt="" className="bubble-img" />}
             {m.content && <Rich text={m.content} />}
           </div>
         ))}
-        {busy && <div className="bubble assistant typing"><span /><span /><span /></div>}
+        {busy && <div className="bubble bot typing"><span /><span /><span /></div>}
       </div>
 
       {error && <div className="assistant-error">{error}</div>}
