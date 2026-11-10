@@ -3,7 +3,7 @@ import express from 'express';
 import { createBot } from './bot.js';
 import { api } from './api.js';
 import { keyDiagnostics, supabase } from './supabase.js';
-import { aiEnabled } from './agent.js';
+import { aiDescription } from './llm.js';
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_URL = (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
@@ -28,7 +28,7 @@ app.get('/health', async (_req, res) => {
     ok: supa.ok && db === 'ok',
     mode: PUBLIC_URL ? 'webhook' : 'polling',
     supabase: { ...supa, db, storage },
-    ia: aiEnabled() ? `activa (${process.env.AI_MODEL || 'claude-sonnet-5-5'})` : 'falta ANTHROPIC_API_KEY',
+    ia: aiDescription() ? `activa (${aiDescription()})` : 'falta GEMINI_API_KEY (gratis en aistudio.google.com)',
     ts: new Date().toISOString(),
   });
 });

@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { useBusiness } from '../lib/BusinessContext.jsx';
 import { apiPost, notifyDataChanged } from '../lib/api.js';
+
+const blobToBase64 = (blob) => new Promise((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(String(r.result).split(',')[1]);
+  r.onerror = reject;
+  r.readAsDataURL(blob);
+});
+const REC_TYPES = ['audio/ogg;codecs=opus', 'audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
 import { uploadImage } from '../lib/images.js';
 
 const SR = typeof window !== 'undefined' ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null;
@@ -70,11 +78,46 @@ export default function Assistant({ open, onClose }) {
     }
   }
 
-  function toggleMic() {
-    if (!SR) {
-      setError('Tu navegador no permite dictado. Usá Chrome/Edge, o el micrófono del teclado del celular.');
+  // Plan B sin dictado del navegador: graba el audio y lo transcribe el servidor (IA gratuita)
+  async function toggleRecorder() {
+    if (listening) { recRef.current?.stop(); return; }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setError('Tu navegador no permite grabar audio. Usá el micrófono del teclado del celular.');
       return;
     }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = REC_TYPES.find((t) => MediaRecorder.isTypeSupported?.(t)) || '';
+      const rec = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      const chunks = [];
+      rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+      rec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setListening(false);
+        const blob = new Blob(chunks, { type: rec.mimeType || mimeType || 'audio/webm' });
+        if (blob.size < 2000) return;
+        setInput('Transcribiendo audio…');
+        try {
+          const { text } = await apiPost('/api/transcribe', { audio_base64: await blobToBase64(blob), mime: blob.type });
+          setInput('');
+          if (text) send(text);
+        } catch (err) {
+          setInput('');
+          setError(err.message);
+        }
+      };
+      recRef.current = rec;
+      setError('');
+      setListening(true);
+      rec.start();
+      setTimeout(() => rec.state === 'recording' && rec.stop(), 60000); // máx 1 minuto
+    } catch {
+      setError('Permití el uso del micrófono en el navegador.');
+    }
+  }
+
+  function toggleMic() {
+    if (!SR) { toggleRecorder(); return; }
     if (listening) { recRef.current?.stop(); return; }
     const rec = new SR();
     rec.lang = 'es-AR';

@@ -5,6 +5,7 @@ import {
 } from './utils.js';
 import { UserError, fail, findProduct } from './actions.js';
 import { runAgent, aiEnabled } from './agent.js';
+import { transcribe } from './llm.js';
 
 const TZ = process.env.TZ_NEGOCIO || 'America/Argentina/Buenos_Aires';
 const FRONTEND_URL = process.env.FRONTEND_URL || '';
@@ -34,7 +35,7 @@ export const HELP = `<b>📦 StockFácil — comandos</b>
 
 Separá los datos con <code>|</code> o <code>;</code>. Los números aceptan 1.500,50 o 1500.5
 
-💬 <b>Asistente IA:</b> también podés escribirme normal ("vendí 2 remeras negras", "¿cómo vengo este mes?") o mandarme una <b>foto</b> de un artículo para reconocerlo.`;
+💬 <b>Asistente IA:</b> también podés escribirme normal ("vendí 2 remeras negras", "¿cómo vengo este mes?") mandarme un <b>audio</b> o una <b>foto</b> de un artículo para reconocerlo.`;
 
 const COMMANDS = [
   ['alta', 'Dar de alta un producto'],
@@ -378,7 +379,7 @@ ${top ? `\n<b>🏆 Más vendidos</b>\n${top}\n` : ''}
   bot.on('photo', async (ctx) => {
     const business = ctx.state.business;
     if (!business) return ctx.reply('Primero vinculá este chat: /vincular CODIGO');
-    if (!aiEnabled()) return ctx.reply('Para reconocer fotos hay que activar el asistente IA (ANTHROPIC_API_KEY).');
+    if (!aiEnabled()) return ctx.reply('Para reconocer fotos hay que activar el asistente IA (GEMINI_API_KEY).');
     try {
       const photo = ctx.message.photo[ctx.message.photo.length - 1]; // mayor resolución
       const link = await ctx.telegram.getFileLink(photo.file_id);
@@ -391,7 +392,23 @@ ${top ? `\n<b>🏆 Más vendidos</b>\n${top}\n` : ''}
     }
   });
 
-  bot.on(['voice', 'audio'], (ctx) => ctx.reply('🎙️ Los audios todavía no se procesan por Telegram. Usá el micrófono del asistente en la web, o escribime el mensaje.'));
+  bot.on(['voice', 'audio'], async (ctx) => {
+    if (!ctx.state.business) return ctx.reply('Primero vinculá este chat: /vincular CODIGO');
+    if (!aiEnabled()) return ctx.reply('Para entender audios hay que activar el asistente IA (GEMINI_API_KEY).');
+    const media = ctx.message.voice || ctx.message.audio;
+    if (media.duration > 120) return ctx.reply('El audio es muy largo: mandame uno de menos de 2 minutos.');
+    try {
+      await ctx.sendChatAction('typing').catch(() => {});
+      const link = await ctx.telegram.getFileLink(media.file_id);
+      const buf = Buffer.from(await (await fetch(link.href)).arrayBuffer());
+      const text = await transcribe(buf, media.mime_type || 'audio/ogg');
+      await html(ctx, `🎙️ <i>${esc(text)}</i>`);
+      return askAgent(ctx, text);
+    } catch (e) {
+      console.error('[audio]', e);
+      return ctx.reply('⚠️ No pude entender el audio: ' + e.message);
+    }
+  });
 
   bot.on('text', (ctx) => {
     if (ctx.message.text.startsWith('/')) return ctx.reply('Comando desconocido. Mirá /ayuda');

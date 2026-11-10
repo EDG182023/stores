@@ -18,7 +18,9 @@ stockfacil/
 
 ## Qué hace
 
-**✨ Asistente IA (web y Telegram)**: hablale o escribile en lenguaje natural ("vendí 2 remeras negras", "pagué 3500 de envío", "¿cómo vengo este mes?"). Mandale una **foto** de un artículo y lo reconoce comparándolo con tu catálogo: te dice cuál es, su stock y precio, y ejecuta lo que pidas (vender, reponer, actualizar la foto) o lo da de alta con nombre, categoría, color y descripción. Usa Claude (Anthropic). El micrófono usa el dictado del navegador (Chrome/Edge/Safari).
+**✨ Asistente IA (web y Telegram)**: hablale o escribile en lenguaje natural ("vendí 2 remeras negras", "pagué 3500 de envío", "¿cómo vengo este mes?"). Mandale una **foto** de un artículo y lo reconoce comparándolo con tu catálogo: te dice cuál es, su stock y precio, y ejecuta lo que pidas (vender, reponer, actualizar la foto) o lo da de alta con nombre, categoría, color y descripción. También entiende **audios** (micrófono en la web y notas de voz en Telegram).
+
+Usa **modelos de IA gratuitos**: Google Gemini (`gemini-3.5-flash-lite`, plan gratis de AI Studio) por defecto. Opcionalmente Groq (Whisper gratis para audios) y OpenRouter (modelos `:free`) como respaldo automático si se agota el cupo.
 
 **🖼️ Fichas completas**: foto, marca, código de barras, peso, largo/ancho/alto, talle, color, material y descripción comercial.
 
@@ -76,8 +78,8 @@ Después corré también **`supabase/migration_002_asistente_fotos.sql`** (fotos
    - `SUPABASE_SERVICE_ROLE_KEY` (la **service_role**, secreta)
    - `TELEGRAM_BOT_TOKEN`
    - `FRONTEND_URL` (URL de Vercel)
-   - `ANTHROPIC_API_KEY` (de <https://console.anthropic.com> → API Keys; activa el asistente IA)
-   - `AI_MODEL` (opcional; por defecto `claude-sonnet-5-5`, más económico: `claude-haiku-5-5`)
+   - `GEMINI_API_KEY` — **gratis** en <https://aistudio.google.com/apikey> (activa el asistente: texto, fotos y audios)
+   - Opcionales: `GROQ_API_KEY` (gratis en <https://console.groq.com>, transcribe audios con Whisper y sirve de respaldo), `OPENROUTER_API_KEY` + `OPENROUTER_MODEL` (un modelo `:free`), `AI_MODEL` para cambiar el modelo de Gemini (ej. `gemini-3.6-flash`, mejor visión pero menos cupo diario)
 4. Deploy. Render define `RENDER_EXTERNAL_URL` y el bot registra el webhook solo. Verificá `https://tu-servicio.onrender.com/health`.
 
 > En el plan gratis Render "duerme" el servicio tras 15 min sin uso: el primer mensaje puede tardar ~30-50 s en responder. Para evitarlo, usá un plan pago o un ping externo (ej. UptimeRobot a `/health` cada 10 min).

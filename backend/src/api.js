@@ -1,6 +1,7 @@
 import express from 'express';
 import { supabase } from './supabase.js';
 import { runAgent, aiEnabled } from './agent.js';
+import { transcribe } from './llm.js';
 
 export const api = express.Router();
 
@@ -13,7 +14,7 @@ api.use((req, res, next) => {
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   return next();
 });
-api.use(express.json({ limit: '1mb' }));
+api.use(express.json({ limit: '12mb' }));
 
 /** Valida el JWT de Supabase y carga el negocio del usuario */
 async function auth(req, res, next) {
@@ -46,11 +47,23 @@ api.post('/chat', auth, async (req, res) => {
     return res.json(out);
   } catch (e) {
     console.error('[chat]', e);
-    const msg = e?.status === 401 ? 'La clave de la IA (ANTHROPIC_API_KEY) es inválida.'
-      : e?.status === 429 ? 'La IA está saturada, probá en unos segundos.'
-        : e?.status === 400 && /credit/i.test(e?.message || '') ? 'Sin crédito en la cuenta de Anthropic.'
-          : 'Error del asistente: ' + (e.message || 'desconocido');
+    const msg = e?.status === 401 || e?.status === 403 ? 'La clave de la IA es inválida (revisá GEMINI_API_KEY en Render).'
+      : e?.status === 429 ? 'Se agotó el cupo gratuito de la IA por ahora. Esperá un rato (se renueva por minuto y por día).'
+        : 'Error del asistente: ' + (e.message || 'desconocido');
     return res.status(500).json({ error: msg });
+  }
+});
+
+// ---------- Audio a texto (para navegadores sin dictado) ----------
+api.post('/transcribe', auth, async (req, res) => {
+  const { audio_base64: b64, mime = 'audio/ogg' } = req.body || {};
+  if (!b64) return res.status(400).json({ error: 'Falta el audio' });
+  try {
+    const text = await transcribe(Buffer.from(b64, 'base64'), mime);
+    return res.json({ text });
+  } catch (e) {
+    console.error('[transcribe]', e.message);
+    return res.status(e.status === 429 ? 429 : 500).json({ error: e.message });
   }
 });
 

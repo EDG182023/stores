@@ -1,17 +1,15 @@
 // Asistente IA del negocio: entiende lenguaje natural, fotos y ejecuta acciones con herramientas.
-import Anthropic from '@anthropic-ai/sdk';
+// Funciona con modelos gratuitos (Gemini por defecto) vía API compatible con OpenAI.
+import { chat, aiEnabled, imageDataUrl } from './llm.js';
 import {
   UserError, searchProducts, getProduct, createProduct, updateProduct, insertMovement,
   dashboard, lastMovements, deleteMovement,
 } from './actions.js';
 
-const MODEL = process.env.AI_MODEL || 'claude-sonnet-5-5';
+export { aiEnabled };
 const TZ = process.env.TZ_NEGOCIO || 'America/Argentina/Buenos_Aires';
 const MAX_STEPS = 10;
 
-let client = null;
-export const aiEnabled = () => Boolean(process.env.ANTHROPIC_API_KEY);
-const ai = () => (client ||= new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }));
 
 const n = (desc) => ({ type: 'number', description: desc });
 const s = (desc) => ({ type: 'string', description: desc });
@@ -30,7 +28,11 @@ const PRODUCT_PROPS = {
   largo_cm: n('Largo en cm'),
   ancho_cm: n('Ancho en cm'),
   alto_cm: n('Alto en cm'),
-  atributos: { type: 'object', description: 'Atributos libres: {"talle":"M","color":"negro","material":"algodón"}', additionalProperties: { type: 'string' } },
+  atributos: {
+    type: 'object',
+    description: 'Atributos del artículo',
+    properties: { talle: s('Talle'), color: s('Color'), material: s('Material'), otros: s('Otros atributos, texto libre') },
+  },
   usar_foto_adjunta: { type: 'boolean', description: 'true para guardar como foto del producto la imagen que adjuntó el usuario en este mensaje' },
 };
 
@@ -96,6 +98,11 @@ const TOOLS = [
   },
 ];
 
+const OPENAI_TOOLS = TOOLS.map((t) => ({
+  type: 'function',
+  function: { name: t.name, description: t.description, parameters: t.input_schema },
+}));
+
 function systemPrompt(business) {
   const hoy = new Date().toLocaleString('es-AR', { timeZone: TZ, dateStyle: 'full', timeStyle: 'short' });
   return `Sos el asistente de gestión de "${business.name}", un emprendimiento que usa StockFácil. Moneda: ${business.currency}. Ahora: ${hoy}.
@@ -146,14 +153,20 @@ async function runTool(name, input, ctx) {
       };
     }
     case 'ver_fotos_productos': {
-      const blocks = [];
+      // Las imágenes se envían en un mensaje aparte (no todos los proveedores aceptan imágenes en el resultado de una herramienta)
+      const images = [];
+      const lines = [];
       for (const id of (input.producto_ids || []).slice(0, 4)) {
         const p = await getProduct(bid, id).catch(() => null);
         if (!p) continue;
-        blocks.push({ type: 'text', text: `Producto ${p.name} (id ${p.id})${p.image_url ? ':' : ': sin foto'}` });
-        if (p.image_url) blocks.push({ type: 'image', source: { type: 'url', url: p.image_url } });
+        if (!p.image_url) { lines.push(`${p.name} (id ${p.id}): sin foto`); continue; }
+        try {
+          images.push({ type: 'text', text: `Foto del producto "${p.name}" (id ${p.id}):` });
+          images.push({ type: 'image_url', image_url: { url: await imageDataUrl(p.image_url) } });
+          lines.push(`${p.name} (id ${p.id}): foto adjunta abajo`);
+        } catch { lines.push(`${p.name} (id ${p.id}): no se pudo cargar la foto`); }
       }
-      return { content: blocks.length ? blocks : [{ type: 'text', text: 'Sin productos' }] };
+      return { text: lines.join('\n') || 'Sin productos', images };
     }
     case 'crear_producto': {
       const p = await createProduct(bid, withPhoto(input), movCtx);
@@ -219,60 +232,69 @@ async function runTool(name, input, ctx) {
  */
 export async function runAgent({ business, history = [], message, imageUrl, source = 'asistente', createdBy }) {
   if (!aiEnabled()) {
-    return { reply: 'El asistente todavía no está activado: falta configurar ANTHROPIC_API_KEY en el servidor.', changed: false };
+    return { reply: 'El asistente todavía no está activado: falta configurar GEMINI_API_KEY en el servidor (es gratis en aistudio.google.com).', changed: false };
   }
   const ctx = { business, imageUrl, source, createdBy, changed: false, actions: [] };
 
-  const userContent = [];
-  if (imageUrl) userContent.push({ type: 'image', source: { type: 'url', url: imageUrl } });
-  userContent.push({ type: 'text', text: message?.trim() || (imageUrl ? '¿Qué producto es este?' : 'Hola') });
+  const text = message?.trim() || (imageUrl ? '¿Qué producto es este?' : 'Hola');
+  const userContent = imageUrl
+    ? [{ type: 'image_url', image_url: { url: await imageDataUrl(imageUrl) } }, { type: 'text', text }]
+    : text;
 
-  const messages = [
-    ...history.slice(-12).filter((m) => m?.content).map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content).slice(0, 4000) })),
-    { role: 'user', content: userContent },
-  ];
-  // La API exige que el primer mensaje sea del usuario y que alternen
-  while (messages.length && messages[0].role !== 'user') messages.shift();
-  const merged = [];
-  for (const m of messages) {
-    const last = merged[merged.length - 1];
-    if (last && last.role === m.role) {
-      const toArr = (c) => (typeof c === 'string' ? [{ type: 'text', text: c }] : c);
-      last.content = [...toArr(last.content), ...toArr(m.content)];
-    } else merged.push({ ...m });
+  const messages = [{ role: 'system', content: systemPrompt(business) }];
+  const prev = history.slice(-12).filter((m) => m?.content)
+    .map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content).slice(0, 4000) }));
+  while (prev.length && prev[0].role !== 'user') prev.shift();
+  // Unimos mensajes seguidos del mismo rol (algunos proveedores exigen que alternen)
+  const turns = [];
+  for (const m of [...prev, { role: 'user', content: userContent }]) {
+    const last = turns[turns.length - 1];
+    if (last && last.role === m.role && typeof last.content === 'string' && typeof m.content === 'string') last.content += '\n' + m.content;
+    else if (last && last.role === m.role) {
+      const arr = (c) => (typeof c === 'string' ? [{ type: 'text', text: c }] : c);
+      last.content = [...arr(last.content), ...arr(m.content)];
+    } else turns.push({ ...m });
   }
+  messages.push(...turns);
 
+  let needsVision = Boolean(imageUrl);
+  let provider; // mantenemos el mismo proveedor durante toda la conversación de herramientas
   for (let step = 0; step < MAX_STEPS; step++) {
-    const res = await ai().messages.create({
-      model: MODEL,
-      max_tokens: 1500,
-      system: systemPrompt(business),
-      tools: TOOLS,
-      messages: merged,
-    });
-    merged.push({ role: 'assistant', content: res.content });
+    const { message: msg, provider: used } = await chat({
+      messages, tools: OPENAI_TOOLS, tool_choice: 'auto', temperature: 0.2, max_tokens: 1500,
+    }, { needsVision, preferred: provider });
+    provider = used;
 
-    if (res.stop_reason !== 'tool_use') {
-      const reply = res.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
-      return { reply: reply || 'Listo.', changed: ctx.changed, actions: ctx.actions };
+    // Se devuelve el mensaje tal cual (Gemini necesita sus "thought signatures" en las llamadas)
+    const assistantMsg = { ...msg, role: 'assistant' };
+    if (assistantMsg.tool_calls?.length && !assistantMsg.content) assistantMsg.content = null;
+    messages.push(assistantMsg);
+
+    const calls = msg.tool_calls || [];
+    if (!calls.length) {
+      const reply = (Array.isArray(msg.content) ? msg.content.map((c) => c.text || '').join('') : msg.content || '').trim();
+      return { reply: reply || 'Listo.', changed: ctx.changed, actions: ctx.actions, provider };
     }
 
-    const results = [];
-    for (const block of res.content.filter((b) => b.type === 'tool_use')) {
+    const extraImages = [];
+    for (const call of calls) {
       let out;
       try {
-        out = await runTool(block.name, block.input || {}, ctx);
-        ctx.actions.push(block.name);
+        let input = {};
+        try { input = JSON.parse(call.function?.arguments || '{}') || {}; } catch { throw new UserError('Argumentos inválidos'); }
+        out = await runTool(call.function.name, input, ctx);
+        ctx.actions.push(call.function.name);
       } catch (e) {
-        if (!(e instanceof UserError)) console.error('[agente]', block.name, e);
-        out = { text: `Error: ${e.message}`, isError: true };
+        if (!(e instanceof UserError)) console.error('[agente]', call.function?.name, e);
+        out = { text: `Error: ${e.message}` };
       }
-      results.push({
-        type: 'tool_result', tool_use_id: block.id,
-        content: out.content || out.text, ...(out.isError ? { is_error: true } : {}),
-      });
+      messages.push({ role: 'tool', tool_call_id: call.id, name: call.function?.name, content: out.text || 'ok' });
+      if (out.images?.length) extraImages.push(...out.images);
     }
-    merged.push({ role: 'user', content: results });
+    if (extraImages.length) {
+      messages.push({ role: 'user', content: [{ type: 'text', text: 'Fotos de los productos pedidos para comparar:' }, ...extraImages] });
+      needsVision = true;
+    }
   }
   return { reply: 'Hice varias operaciones pero no llegué a terminar. ¿Me repetís qué falta?', changed: ctx.changed, actions: ctx.actions };
 }
