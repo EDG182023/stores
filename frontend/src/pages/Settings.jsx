@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase.js';
 import { useBusiness } from '../lib/BusinessContext.jsx';
 import { CURRENCIES, dateTime } from '../lib/format.js';
+import { API_URL } from '../lib/api.js';
 
 const BOT = import.meta.env.VITE_TELEGRAM_BOT_USERNAME;
 
@@ -116,6 +117,8 @@ export default function Settings() {
         </div>
       </div>
 
+      <IntegrationCard business={business} setBusiness={setBusiness} />
+
       <div className="card">
         <h3>💬 Comandos del bot</h3>
         <div className="cmd-grid">
@@ -129,6 +132,52 @@ export default function Settings() {
           <div><code>/deshacer</code><span>Borra tu último movimiento</span></div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function IntegrationCard({ business, setBusiness }) {
+  const [show, setShow] = useState(false);
+  const [msg, setMsg] = useState('');
+  const endpoint = API_URL ? `${API_URL}/api/v1/catalog` : '(configurá VITE_API_URL)';
+
+  async function regenerate() {
+    if (!confirm('¿Generar una clave nueva? Las tiendas que usen la anterior dejarán de funcionar.')) return;
+    const { data, error } = await supabase.rpc('regenerate_api_key', { p_business: business.id });
+    if (error) return setMsg(error.message);
+    setBusiness({ ...business, api_key: data });
+    setMsg('Clave regenerada ✓');
+  }
+
+  function copy(text) {
+    navigator.clipboard?.writeText(text).then(() => { setMsg('Copiado ✓'); setTimeout(() => setMsg(''), 1500); });
+  }
+
+  return (
+    <div className="card">
+      <h3>🔌 Integración con tiendas online</h3>
+      <p className="muted">Tu catálogo (nombre, precio, stock, fotos, medidas y peso) disponible para conectar con tu web de ventas, Tiendanube, WooCommerce o Mercado Libre.</p>
+      {!business.api_key ? (
+        <p className="alert">Falta actualizar la base de datos: corré <code>migration_002_asistente_fotos.sql</code> en Supabase.</p>
+      ) : (
+        <div className="form">
+          <label>Endpoint del catálogo
+            <div className="row-inline"><input readOnly value={endpoint} /><button className="btn ghost small" type="button" onClick={() => copy(endpoint)}>Copiar</button></div>
+          </label>
+          <label>API key (header <code>X-Api-Key</code>)
+            <div className="row-inline">
+              <input readOnly value={show ? business.api_key : '•'.repeat(24)} />
+              <button className="btn ghost small" type="button" onClick={() => setShow(!show)}>{show ? 'Ocultar' : 'Ver'}</button>
+              <button className="btn ghost small" type="button" onClick={() => copy(business.api_key)}>Copiar</button>
+            </div>
+          </label>
+          <div className="row-inline">
+            <button className="btn ghost small" type="button" onClick={regenerate}>Regenerar clave</button>
+            {API_URL && <a className="btn ghost small" href={`${API_URL}/health`} target="_blank" rel="noreferrer">Diagnóstico del servidor</a>}
+            {msg && <span className="pos small">{msg}</span>}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

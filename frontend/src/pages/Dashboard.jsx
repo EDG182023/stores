@@ -7,6 +7,7 @@ import { supabase } from '../lib/supabase.js';
 import { useBusiness } from '../lib/BusinessContext.jsx';
 import { compactMoney, money, num, shortDate } from '../lib/format.js';
 import Kpi from '../components/Kpi.jsx';
+import { onDataChanged } from '../lib/api.js';
 
 const PERIODS = [
   { k: 'hoy', label: 'Hoy' },
@@ -49,6 +50,7 @@ export default function Dashboard() {
   }, [business.id, period]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => onDataChanged(load), [load]);
 
   // Refresco en vivo cuando entra un movimiento (p. ej. desde Telegram)
   useEffect(() => {

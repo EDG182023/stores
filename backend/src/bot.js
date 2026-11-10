@@ -1,8 +1,10 @@
 import { Telegraf } from 'telegraf';
-import { supabase } from './supabase.js';
+import { supabase, keyDiagnostics, uploadImage } from './supabase.js';
 import {
   commandArgs, splitArgs, parseNumber, money, qty, esc, likeEscape, dateTime,
 } from './utils.js';
+import { UserError, fail, findProduct } from './actions.js';
+import { runAgent, aiEnabled } from './agent.js';
 
 const TZ = process.env.TZ_NEGOCIO || 'America/Argentina/Buenos_Aires';
 const FRONTEND_URL = process.env.FRONTEND_URL || '';
@@ -30,7 +32,9 @@ export const HELP = `<b>📦 StockFácil — comandos</b>
 /deshacer — borra tu último movimiento
 /negocio — info del negocio
 
-Separá los datos con <code>|</code> o <code>;</code>. Los números aceptan 1.500,50 o 1500.5`;
+Separá los datos con <code>|</code> o <code>;</code>. Los números aceptan 1.500,50 o 1500.5
+
+💬 <b>Asistente IA:</b> también podés escribirme normal ("vendí 2 remeras negras", "¿cómo vengo este mes?") o mandarme una <b>foto</b> de un artículo para reconocerlo.`;
 
 const COMMANDS = [
   ['alta', 'Dar de alta un producto'],
@@ -54,35 +58,12 @@ const ICON = { venta: '🟢', compra: '🔵', ajuste: '⚙️', gasto: '🔴', i
 const html = (ctx, text, extra = {}) =>
   ctx.reply(text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, ...extra });
 
-class UserError extends Error {}
-const fail = (msg) => { throw new UserError(msg); };
-
 function num(value, label, { allowZero = true, allowNegative = false } = {}) {
   const n = parseNumber(value);
   if (Number.isNaN(n)) fail(`"${value}" no es un número válido para ${label}.`);
   if (!allowNegative && n < 0) fail(`${label} no puede ser negativo.`);
   if (!allowZero && n === 0) fail(`${label} debe ser mayor a 0.`);
   return n;
-}
-
-async function findProduct(businessId, query) {
-  const q = (query || '').trim();
-  if (!q) fail('Indicá el producto.');
-  const base = () => supabase.from('products').select('*')
-    .eq('business_id', businessId).eq('active', true);
-
-  // 1) nombre exacto (sin mayúsculas)  2) SKU exacto  3) contiene
-  let { data } = await base().ilike('name', likeEscape(q)).limit(2);
-  if (data?.length === 1) return data[0];
-  ({ data } = await base().eq('sku', q).limit(2));
-  if (data?.length === 1) return data[0];
-  ({ data } = await base().ilike('name', `%${likeEscape(q)}%`).order('name').limit(8));
-  if (!data?.length) fail(`No encontré "${q}". Mirá /stock o dalo de alta con /alta.`);
-  if (data.length > 1) {
-    fail(`Hay varios productos con "${q}":\n` + data.map((p) => `• ${p.name}`).join('\n') +
-      '\nEscribí el nombre más completo.');
-  }
-  return data[0];
 }
 
 async function insertMovement(ctx, business, row) {
@@ -146,7 +127,16 @@ export function createBot(token) {
   async function linkChat(ctx, rawCode) {
     const code = (rawCode || '').trim().toUpperCase();
     if (!code) return html(ctx, 'Usá: <code>/vincular CODIGO</code>');
-    const { data: lc } = await supabase.from('link_codes').select('*').eq('code', code).maybeSingle();
+    const { data: lc, error: lcErr } = await supabase.from('link_codes').select('*').eq('code', code).maybeSingle();
+    if (lcErr) console.error('[vincular] error leyendo link_codes', lcErr);
+    if (!lc) {
+      const d = keyDiagnostics();
+      if (!d.ok) {
+        console.error('[vincular] ' + d.mensaje);
+        return ctx.reply('⚠️ El servidor está mal configurado (clave de Supabase incorrecta), por eso no encuentra el código. Avisale al administrador: ' + d.mensaje);
+      }
+      console.warn(`[vincular] código ${code} no encontrado (proyecto ${d.proyecto})`);
+    }
     if (!lc || new Date(lc.expires_at) < new Date()) {
       return ctx.reply('❌ Código inválido o vencido. Generá uno nuevo desde el panel web.');
     }
@@ -364,10 +354,48 @@ ${top ? `\n<b>🏆 Más vendidos</b>\n${top}\n` : ''}
       (FRONTEND_URL ? `\nPanel: ${esc(FRONTEND_URL)}` : ''));
   });
 
-  // Mensajes sueltos
+  // ---------- Asistente IA: texto libre y fotos ----------
+  const histories = new Map(); // chat_id -> [{role, content}]
+  async function askAgent(ctx, message, imageUrl) {
+    const business = ctx.state.business;
+    if (!business) return ctx.reply('Primero vinculá este chat: /vincular CODIGO');
+    if (!aiEnabled()) return ctx.reply('Usá un comando, por ejemplo /venta Remera | 1 — o /ayuda para ver todos.');
+    await ctx.sendChatAction('typing').catch(() => {});
+    const history = histories.get(ctx.chat.id) || [];
+    try {
+      const out = await runAgent({ business, history, message, imageUrl, source: 'telegram', createdBy: String(ctx.chat.id) });
+      history.push({ role: 'user', content: (imageUrl ? '[foto] ' : '') + (message || '') }, { role: 'assistant', content: out.reply });
+      histories.set(ctx.chat.id, history.slice(-12));
+      // Telegram no entiende Markdown de la IA tal cual: convertimos **negrita** a HTML
+      const text = esc(out.reply).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+      return html(ctx, text.slice(0, 4000));
+    } catch (e) {
+      console.error('[agente telegram]', e);
+      return ctx.reply('⚠️ El asistente no pudo responder: ' + (e.message || 'error'));
+    }
+  }
+
+  bot.on('photo', async (ctx) => {
+    const business = ctx.state.business;
+    if (!business) return ctx.reply('Primero vinculá este chat: /vincular CODIGO');
+    if (!aiEnabled()) return ctx.reply('Para reconocer fotos hay que activar el asistente IA (ANTHROPIC_API_KEY).');
+    try {
+      const photo = ctx.message.photo[ctx.message.photo.length - 1]; // mayor resolución
+      const link = await ctx.telegram.getFileLink(photo.file_id);
+      const buf = Buffer.from(await (await fetch(link.href)).arrayBuffer());
+      const url = await uploadImage(business.id, buf, 'image/jpeg', 'tg');
+      return askAgent(ctx, ctx.message.caption || '', url);
+    } catch (e) {
+      console.error('[foto]', e);
+      return ctx.reply('⚠️ No pude procesar la foto: ' + e.message);
+    }
+  });
+
+  bot.on(['voice', 'audio'], (ctx) => ctx.reply('🎙️ Los audios todavía no se procesan por Telegram. Usá el micrófono del asistente en la web, o escribime el mensaje.'));
+
   bot.on('text', (ctx) => {
     if (ctx.message.text.startsWith('/')) return ctx.reply('Comando desconocido. Mirá /ayuda');
-    return ctx.reply('Usá un comando, por ejemplo /venta Remera | 1 — o /ayuda para ver todos.');
+    return askAgent(ctx, ctx.message.text);
   });
 
   bot.catch((err, ctx) => {

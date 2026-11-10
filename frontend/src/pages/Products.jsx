@@ -4,8 +4,14 @@ import { useBusiness } from '../lib/BusinessContext.jsx';
 import { margin, money, num, toNumber } from '../lib/format.js';
 import Modal from '../components/Modal.jsx';
 import MovementForm from '../components/MovementForm.jsx';
+import { onDataChanged } from '../lib/api.js';
+import { uploadImage } from '../lib/images.js';
 
-const EMPTY = { name: '', sku: '', category: '', unit_cost: '', sale_price: '', min_stock: '', initial_stock: '' };
+const EMPTY = {
+  name: '', sku: '', category: '', brand: '', barcode: '', description: '', unit_cost: '', sale_price: '', min_stock: '',
+  initial_stock: '', image_url: '', weight_kg: '', length_cm: '', width_cm: '', height_cm: '', attributes: {},
+};
+const ATTRS = [['talle', 'Talle'], ['color', 'Color'], ['material', 'Material']];
 
 export default function Products() {
   const { business, session } = useBusiness();
@@ -23,11 +29,13 @@ export default function Products() {
   }, [business.id]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => onDataChanged(load), [load]);
 
   const filtered = useMemo(() => {
     const s = search.trim().toLowerCase();
     return products.filter((p) =>
-      (!s || p.name.toLowerCase().includes(s) || (p.sku || '').toLowerCase().includes(s) || (p.category || '').toLowerCase().includes(s))
+      (!s || p.name.toLowerCase().includes(s) || (p.sku || '').toLowerCase().includes(s) || (p.category || '').toLowerCase().includes(s)
+        || (p.brand || '').toLowerCase().includes(s) || (p.barcode || '').includes(s))
       && (!onlyLow || Number(p.stock) <= Number(p.min_stock)));
   }, [products, search, onlyLow]);
 
@@ -71,8 +79,18 @@ export default function Products() {
                   return (
                     <tr key={p.id}>
                       <td>
-                        <div className="strong">{p.name}</div>
-                        <div className="muted small">{[p.sku, p.category].filter(Boolean).join(' · ')}</div>
+                        <div className="prod-cell">
+                          {p.image_url ? <img className="thumb" src={p.image_url} alt="" loading="lazy" /> : <div className="thumb empty">📦</div>}
+                          <div>
+                            <div className="strong">{p.name}</div>
+                            <div className="muted small">
+                              {[p.sku, p.category, p.brand, ...Object.values(p.attributes || {}),
+                                p.weight_kg ? `${num(p.weight_kg)} kg` : null,
+                                p.length_cm || p.width_cm || p.height_cm ? `${num(p.length_cm)}×${num(p.width_cm)}×${num(p.height_cm)} cm` : null,
+                              ].filter(Boolean).join(' · ')}
+                            </div>
+                          </div>
+                        </div>
                       </td>
                       <td className="r"><span className={`badge ${low ? 'red' : 'green'}`}>{num(p.stock)}</span></td>
                       <td className="r">{money(p.unit_cost, cur)}</td>
@@ -96,7 +114,7 @@ export default function Products() {
       </div>
 
       {editing && (
-        <Modal title={editing.id ? 'Editar producto' : 'Nuevo producto'} onClose={() => setEditing(null)}>
+        <Modal wide title={editing.id ? 'Editar producto' : 'Nuevo producto'} onClose={() => setEditing(null)}>
           <ProductForm product={editing} business={business} userId={session.user.id}
             onDone={() => { setEditing(null); load(); }} />
         </Modal>
@@ -114,20 +132,49 @@ export default function Products() {
 
 function ProductForm({ product, business, userId, onDone }) {
   const isNew = !product.id;
-  const [f, setF] = useState({ ...EMPTY, ...product });
+  const [f, setF] = useState(() => {
+    const base = { ...EMPTY, ...product, attributes: { ...(product.attributes || {}) } };
+    for (const k of ['weight_kg', 'length_cm', 'width_cm', 'height_cm', 'sku', 'category', 'brand', 'barcode', 'description', 'image_url']) {
+      if (base[k] === null || base[k] === undefined) base[k] = '';
+    }
+    return base;
+  });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const setAttr = (k) => (e) => setF({ ...f, attributes: { ...f.attributes, [k]: e.target.value } });
 
   const cost = toNumber(f.unit_cost);
   const price = toNumber(f.sale_price);
+  const optNum = (v) => (v === '' || v === null ? null : toNumber(v));
+  const optText = (v) => (String(v || '').trim() || null);
+
+  async function onPhoto(e) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setUploading(true); setError('');
+    try {
+      const url = await uploadImage(business.id, file, 'prod');
+      setF((cur) => ({ ...cur, image_url: url }));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setUploading(false);
+    }
+  }
 
   async function submit(e) {
     e.preventDefault();
     setBusy(true); setError('');
+    const attributes = Object.fromEntries(Object.entries(f.attributes || {}).filter(([, v]) => String(v || '').trim()));
     const row = {
-      name: f.name.trim(), sku: f.sku?.trim() || null, category: f.category?.trim() || null,
+      name: f.name.trim(), sku: optText(f.sku), category: optText(f.category), brand: optText(f.brand),
+      barcode: optText(f.barcode), description: optText(f.description), image_url: optText(f.image_url),
       unit_cost: cost, sale_price: price, min_stock: toNumber(f.min_stock),
+      weight_kg: optNum(f.weight_kg), length_cm: optNum(f.length_cm), width_cm: optNum(f.width_cm), height_cm: optNum(f.height_cm),
+      attributes,
     };
     let res;
     if (isNew) res = await supabase.from('products').insert({ ...row, business_id: business.id }).select().single();
@@ -135,7 +182,8 @@ function ProductForm({ product, business, userId, onDone }) {
 
     if (res.error) {
       setBusy(false);
-      return setError(res.error.code === '23505' ? 'Ya existe un producto con ese nombre.' : res.error.message);
+      return setError(res.error.code === '23505' ? 'Ya existe un producto con ese nombre.'
+        : /column/.test(res.error.message) ? 'Falta actualizar la base: corré migration_002 en Supabase.' : res.error.message);
     }
     const initial = toNumber(f.initial_stock);
     if (isNew && initial > 0) {
@@ -151,10 +199,25 @@ function ProductForm({ product, business, userId, onDone }) {
 
   return (
     <form className="form" onSubmit={submit}>
-      <label>Nombre<input value={f.name} onChange={set('name')} required autoFocus /></label>
+      <div className="photo-field">
+        {f.image_url ? <img src={f.image_url} alt="" /> : <div className="photo-empty">📷</div>}
+        <div className="photo-actions">
+          <label className="btn ghost small">
+            {uploading ? 'Subiendo…' : f.image_url ? 'Cambiar foto' : 'Subir foto'}
+            <input type="file" accept="image/*" hidden onChange={onPhoto} disabled={uploading} />
+          </label>
+          {f.image_url && <button type="button" className="btn ghost small" onClick={() => setF({ ...f, image_url: '' })}>Quitar</button>}
+        </div>
+      </div>
+
+      <label>Nombre<input value={f.name} onChange={set('name')} required autoFocus={isNew} /></label>
       <div className="row">
-        <label>SKU / código<input value={f.sku || ''} onChange={set('sku')} /></label>
-        <label>Categoría<input value={f.category || ''} onChange={set('category')} /></label>
+        <label>Categoría<input value={f.category} onChange={set('category')} /></label>
+        <label>Marca<input value={f.brand} onChange={set('brand')} /></label>
+      </div>
+      <div className="row">
+        <label>SKU / código<input value={f.sku} onChange={set('sku')} /></label>
+        <label>Código de barras<input value={f.barcode} onChange={set('barcode')} inputMode="numeric" /></label>
       </div>
       <div className="row">
         <label>Costo unitario<input type="number" step="any" min="0" value={f.unit_cost} onChange={set('unit_cost')} required /></label>
@@ -166,13 +229,33 @@ function ProductForm({ product, business, userId, onDone }) {
           ? <label>Stock inicial<input type="number" step="any" min="0" value={f.initial_stock} onChange={set('initial_stock')} /></label>
           : <label>Stock actual<input value={num(product.stock)} disabled title="Se modifica con compras, ventas o ajustes" /></label>}
       </div>
+
+      <fieldset className="fieldset">
+        <legend>Medidas y peso (para envíos y tiendas online)</legend>
+        <div className="row four">
+          <label>Peso (kg)<input type="number" step="any" min="0" value={f.weight_kg} onChange={set('weight_kg')} /></label>
+          <label>Largo (cm)<input type="number" step="any" min="0" value={f.length_cm} onChange={set('length_cm')} /></label>
+          <label>Ancho (cm)<input type="number" step="any" min="0" value={f.width_cm} onChange={set('width_cm')} /></label>
+          <label>Alto (cm)<input type="number" step="any" min="0" value={f.height_cm} onChange={set('height_cm')} /></label>
+        </div>
+        <div className="row">
+          {ATTRS.map(([k, label]) => (
+            <label key={k}>{label}<input value={f.attributes?.[k] || ''} onChange={setAttr(k)} /></label>
+          ))}
+        </div>
+      </fieldset>
+
+      <label>Descripción
+        <textarea rows={3} value={f.description} onChange={set('description')} placeholder="Texto para publicar en tu tienda online" />
+      </label>
+
       <div className="summary">
         <span>Margen: <b>{margin(price, cost).toFixed(1)}%</b></span>
         <span>Ganancia por unidad: <b>{money(price - cost, business.currency)}</b></span>
         {isNew && toNumber(f.initial_stock) > 0 && <span>Inversión inicial: <b>{money(toNumber(f.initial_stock) * cost, business.currency)}</b></span>}
       </div>
       {error && <div className="alert">{error}</div>}
-      <button className="btn primary" disabled={busy}>{busy ? 'Guardando…' : 'Guardar'}</button>
+      <button className="btn primary" disabled={busy || uploading}>{busy ? 'Guardando…' : 'Guardar'}</button>
     </form>
   );
 }

@@ -1,6 +1,9 @@
 import 'dotenv/config';
 import express from 'express';
 import { createBot } from './bot.js';
+import { api } from './api.js';
+import { keyDiagnostics, supabase } from './supabase.js';
+import { aiEnabled } from './agent.js';
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_URL = (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
@@ -10,17 +13,34 @@ const SECRET = (process.env.WEBHOOK_SECRET || 'stockfacil').replace(/[^A-Za-z0-9
 const bot = createBot(process.env.TELEGRAM_BOT_TOKEN);
 const app = express();
 
-app.get('/', (_req, res) => res.send('StockFácil bot ✅'));
-app.get('/health', (_req, res) => res.json({ ok: true, mode: PUBLIC_URL ? 'webhook' : 'polling', ts: new Date().toISOString() }));
+app.get('/', (_req, res) => res.send('StockFácil API ✅'));
+
+// Diagnóstico: abrí /health en el navegador para ver si algo está mal configurado
+app.get('/health', async (_req, res) => {
+  const supa = keyDiagnostics();
+  let db = 'ok';
+  const { error } = await supabase.from('businesses').select('id', { head: true, count: 'exact' });
+  if (error) db = `error: ${error.message}`;
+  let storage = 'ok';
+  const { error: se } = await supabase.storage.getBucket('product-images');
+  if (se) storage = `falta el bucket product-images (corré migration_002 en Supabase): ${se.message}`;
+  res.json({
+    ok: supa.ok && db === 'ok',
+    mode: PUBLIC_URL ? 'webhook' : 'polling',
+    supabase: { ...supa, db, storage },
+    ia: aiEnabled() ? `activa (${process.env.AI_MODEL || 'claude-sonnet-5-5'})` : 'falta ANTHROPIC_API_KEY',
+    ts: new Date().toISOString(),
+  });
+});
+
+app.use('/api', api);
 
 async function main() {
   if (PUBLIC_URL) {
-    // Producción (Render): webhook
     const path = `/telegram/${SECRET}`;
     app.use(await bot.createWebhook({ domain: PUBLIC_URL, path, secret_token: SECRET }));
     console.log(`Webhook configurado en ${PUBLIC_URL}/telegram/***`);
   } else {
-    // Desarrollo local: polling
     bot.launch({ dropPendingUpdates: true });
     console.log('Bot en modo polling (local)');
   }

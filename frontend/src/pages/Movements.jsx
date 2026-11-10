@@ -4,6 +4,7 @@ import { useBusiness } from '../lib/BusinessContext.jsx';
 import { MOVE_TYPES, dateTime, money, num } from '../lib/format.js';
 import Modal from '../components/Modal.jsx';
 import MovementForm from '../components/MovementForm.jsx';
+import { onDataChanged } from '../lib/api.js';
 
 export default function Movements() {
   const { business } = useBusiness();
@@ -30,6 +31,7 @@ export default function Movements() {
   }, [business.id, filter, limit]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => onDataChanged(load), [load]);
 
   const totals = useMemo(() => rows.reduce((t, r) => {
     const sign = MOVE_TYPES[r.type].cash;
@@ -90,7 +92,7 @@ export default function Movements() {
                       <td className={`r strong ${t.cash > 0 ? 'pos' : t.cash < 0 ? 'neg' : ''}`}>
                         {t.cash === 0 ? '' : `${t.cash > 0 ? '+' : '−'} ${money(r.total, cur)}`}
                       </td>
-                      <td title={r.source}>{r.source === 'telegram' ? '📱' : '🌐'}</td>
+                      <td title={r.source}>{{ telegram: '📱', asistente: '✨' }[r.source] || '🌐'}</td>
                       <td><button className="icon-btn" title="Eliminar" onClick={() => remove(r)}>🗑</button></td>
                     </tr>
                   );
